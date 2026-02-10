@@ -80,7 +80,7 @@ def validate_hash():
         if given_hash == new_hash:
             print(abs_path, "hash is valid")
         else:
-            print(abs_path, "hash is valid")
+            print(abs_path, "hash is not valid")
 
 
     # detect newly added files in the directories that contain stored files
@@ -129,20 +129,13 @@ def main():
                 for root, dirs, files in os.walk(path):
                     for fname in files:
                         fullpath = os.path.join(root, fname)
-                        try:
-                            h = hash_file(fullpath)
-                            generate_table(fullpath, h)
-                            print("Added:", fullpath)
-                        except Exception as e:
-                            print("Failed to hash", fullpath, "-", e)
+                        h = hash_file(fullpath)
+                        generate_table(fullpath, h)
+                print("Hash table generated")
             # if direct path to file
             else:
-                try:
-                    h = hash_file(path)
-                    generate_table(path, h)
-                    print("Added:", path)
-                except Exception as e:
-                    print("Failed to hash", path, "-", e)
+                h = hash_file(path)
+                print(generate_table(path, h))
         if choice == "2":
             validate_hash()
         if choice == "3":
