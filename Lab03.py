@@ -44,10 +44,25 @@ class SecurePRNG():
         return output[:n]
 
 
-def stream_cipher(a, b):
-    # Logic: This function should call prng.generate() to get a keystream.
-    # Operation: Return Plaintext XOR Keystream.
-    return bytes(byte1 ^ byte2 for byte1, byte2 in zip(a, b))
+def xor_crypt(a, b):
+    # a must be bytes-like
+    if not isinstance(a, (bytes, bytearray)):
+        raise TypeError("xor_crypt: first argument must be bytes or bytearray")
+
+    a = bytes(a)
+
+    # If b is a SecurePRNG, generate keystream bytes of the right length
+    if isinstance(b, SecurePRNG):
+        b = b.generate(len(a))
+    # Otherwise b must already be bytes-like
+    elif isinstance(b, (bytes, bytearray)):
+        b = bytes(b)
+    else:
+        raise TypeError("xor_crypt: second argument must be SecurePRNG or bytes/bytearray")
+
+    # XOR plaintext/ciphertext with keystream
+    return bytes(x ^ y for x, y in zip(a, b))
+
 
 
 class Entity():
@@ -55,19 +70,19 @@ class Entity():
     
     def __init__(self, name):
         self.name = name
-        self.privatekey = secrets.randbelow(P - 2) + 1
-        self.publickey = pow(G, self.privatekey, P)
-        self.PRNG = None
+        self.private_key = secrets.randbelow(P - 2) + 1
+        self.public_key = pow(G, self.private_key, P)
+        self.session_prng = None
 
     # Returns public key as hex.
     def get_public_hex(self):
-        return hex(self.publickey)
+        return hex(self.public_key)
 
     # Calculates secret and initializes SecurePRNG().
     def establish_session(self, partner_public_hex):
         partner_pub = int(partner_public_hex, 16)
-        shared_secret = pow(partner_pub, self.privatekey, P)
-        self.PRNG = SecurePRNG(shared_secret)
+        shared_secret = pow(partner_pub, self.private_key, P)
+        self.session_prng = SecurePRNG(shared_secret)
         
 
 
@@ -89,81 +104,116 @@ class Network():
 class Mallory():
     # Initializes Mallory with private/public keys.
     def __init__(self):
-        self.privatekey = None
-        self.publichex = None
+        self.private_key = secrets.randbelow(P - 2) + 1
+        self.public_key = pow(G, self.private_key, P)
+        self.public_hex = hex(self.public_key)
         self.alice_prng = None
         self.bob_prng = None
 
     # If Key Exchange: Store sender's key, generate fake secret, return Mallory's public key.
     # If Encrypted Message: Decrypt using "Sender-side" PRNG, modify string, Re-encrypt using "Recipient-side" PRNG.
     def intercept(self, sender, recipient, payload):
-        pass
+        if isinstance(payload, str) and payload.startswith("0x"):
+            victim_pub = int(payload, 16)
+            shared = pow(victim_pub, self.private_key, P)
+            PRNG = SecurePRNG(shared)
+
+            if sender == "Alice":
+                self.alice_prng = PRNG
+                print("[MALLORY] Intercepted Alice public key. Established session with Alice.")
+            elif sender == "Bob":
+                self.bob_prng = PRNG
+                print("[MALLORY] Intercepted Bob public key. Established session with Bob.")
+
+            print(f"[MALLORY] Replacing {sender}'s public key with Mallory's public key.")
+            return hex(self.public_key)
+        
+        if isinstance(payload, (bytes, bytearray)):
+            data = bytes(payload)
+            if sender == "Alice" and recipient == "Bob":
+                if self.alice_prng is None or self.bob_prng is None:
+                    print("[MALLORY] Missing PRNG(s); forwarding without modification.")
+                    return payload
+
+                # Decrypt Alice->Mallory keystream
+                ks_in = self.alice_prng.generate(len(data))
+                plaintext = xor_crypt(data, ks_in)
+
+                # Modify plaintext (optional)
+                try:
+                    text = plaintext.decode("utf-8")
+                    text_mod = text.replace("9pm", "3am")
+                    plaintext_mod = text_mod.encode("utf-8")
+                except UnicodeDecodeError:
+                    plaintext_mod = plaintext  # if not text, leave as-is
+
+                # Re-encrypt Mallory->Bob keystream
+                ks_out = self.bob_prng.generate(len(plaintext_mod))
+                ciphertext_out = xor_crypt(plaintext_mod, ks_out)
+
+                print("[MALLORY] Decrypted Alice->Bob, modified, re-encrypted to Bob.")
+                return ciphertext_out
+
+            if sender == "Bob" and recipient == "Alice":
+                if self.bob_prng is None or self.alice_prng is None:
+                    print("[MALLORY] Missing PRNG(s); forwarding without modification.")
+                    return payload
+
+                ks_in = self.bob_prng.generate(len(data))
+                plaintext = xor_crypt(data, ks_in)
+
+                # Modify plaintext (optional)
+                try:
+                    text = plaintext.decode("utf-8")
+                    text_mod = text.replace("hello", "hacked").replace("Bob", "Mallory")
+                    plaintext_mod = text_mod.encode("utf-8")
+                except UnicodeDecodeError:
+                    plaintext_mod = plaintext
+
+                ks_out = self.alice_prng.generate(len(plaintext_mod))
+                ciphertext_out = xor_crypt(plaintext_mod, ks_out)
+
+                print("[MALLORY] Decrypted Bob->Alice, modified, re-encrypted to Alice.")
+                return ciphertext_out
+    
+
 
 def main():
     # ==========================================
     # SCENARIO A: BENIGN (SECURE) COMMUNICATION
     # ==========================================
     print_header("SCENARIO A: BENIGN (SECURE) COMMUNICATION")
-
     alice = Entity("Alice")
     bob = Entity("Bob")
     net = Network()
-
-    # Step 0: Parameters
+    # Display Group Parameters
     print_step("Step 0: Global Group Parameters")
     print_info("G (Generator)", G)
     print_info("P (Prime)", P)
-
-    # Step 1: Public Key Exchange
     print_step("Step 1: Public Key Exchange")
-    print_info("Alice Private (a)", alice.privatekey)
-    print_info("Bob Private (b)", bob.privatekey)
-
+    print_info("Alice Private (a)", alice.private_key)
+    print_info("Bob Private (b)", bob.private_key)
     # Alice -> Bob
     alice_pub = alice.get_public_hex()
     print_info("Alice Public (A = G^a mod P)", alice_pub)
     key_for_bob = net.send("Alice", "Bob", alice_pub)
-
     # Bob -> Alice
     bob_pub = bob.get_public_hex()
     print_info("Bob Public (B = G^b mod P)", bob_pub)
     key_for_alice = net.send("Bob", "Alice", bob_pub)
-
-    # Step 2: Establish shared secret
     print_step("Step 2: Establishing Sessions")
     alice.establish_session(key_for_alice)
     bob.establish_session(key_for_bob)
     print(" [Status]: Shared Secret computed: S = B^a mod P = A^b mod P")
-
-    # Step 3: Secure Message Transmission
     print_step("Step 3: Secure Message Transmission")
-
-    message = b"Jimminy Crickets Batman! I just saw a gnome absolutely slime out a guy with his own gun!!!"
-    print_info("Alice plaintext", message.decode())
-
-    # Alice generates keystream
-    alice_keystream = alice.PRNG.generate(len(message))
-
-    # Encrypt
-    encrypted_msg = stream_cipher(message, alice_keystream)
-    print_info("Ciphertext (hex)", encrypted_msg.hex())
-
-    # Send over network
+    message = b"In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell..." # Put in your test message here
+    encrypted_msg = xor_crypt(message, alice.session_prng)
     delivered_data = net.send("Alice", "Bob", encrypted_msg)
-
-    # Bob generates same keystream (same shared secret state)
-    bob_keystream = bob.PRNG.generate(len(delivered_data))
-
-    # Decrypt
-    final_message = stream_cipher(delivered_data, bob_keystream)
-
-    print_info("Bob decrypted", final_message.decode(errors="replace"))
-
-
+    final_message = xor_crypt(delivered_data, bob.session_prng)
+    print_info("Bob decrypted", final_message.decode())
     # ==========================================
     # SCENARIO B: MALICIOUS (MITM) ATTACK
     # ==========================================
-    '''
     print_header("SCENARIO B: MALICIOUS (MITM) ATTACK")
     alice = Entity("Alice")
     bob = Entity("Bob")
@@ -194,7 +244,6 @@ def main():
     print_info("Bob received", final_message.decode())
     if b"3am" in final_message:
         print("\n[DANGER] MITM SUCCESS: Mallory used her private key (m) to decrypt and re-encrypt.")
-    '''
 
 # Main Function
 if __name__ == "__main__":
